@@ -1,0 +1,137 @@
+name: Deploy to Boxity
+
+# Boxity Hosting (hosting.bloxity.io/docs) + Release flow (docs.bloxity.io/#environments):
+#   dev  branch -> dev  channel   (volley-spike.dev.play.bloxity.io)
+#   main branch -> prod channel   (volley-spike.play.bloxity.io)
+#   Every push deploys to the prod platform, and to the stage platform too once the repo has
+#   the secret LEGION_DEPLOY_TOKEN_STAGE. "Run workflow" deploys any branch to ONE platform.
+# Order: verify (checks, ONE client build, size, zip) -> server image + deploy -> frontend upload.
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Platform to deploy this branch to
+        type: choice
+        options: [staging, prod]
+        default: staging
+
+concurrency:
+  group: boxity-deploy-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  GAME_ID: volley-spike  # = GAME_ID in shared/constants.js and the game id on hosting.bloxity.io
+  ROOM_SIZE: 6           # players per room = the Colyseus room's maxClients (MAX_PLAYERS in shared/constants.js); Boxity decides players per pod itself
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run check          # syntax check of server / shared / tools (no TypeScript project)
+      - run: npm run build          # the ONE client build (no environment baked in) + 12 MB size gate
+      - run: npm run test:mp        # two real clients + CPUs play a whole match over Colyseus
+      - name: Zip the client (index.html at the archive root)
+        run: |
+          rm -f frontend.zip
+          (cd client/dist && zip -qr -X ../../frontend.zip .)
+          unzip -Z1 frontend.zip | grep -qx 'index.html' || { echo "::error::index.html is not at the root of frontend.zip"; exit 1; }
+          ls -l frontend.zip
+      - uses: actions/upload-artifact@v4
+        with: { name: frontend, path: frontend.zip, retention-days: 7, if-no-files-found: error }
+
+  targets:
+    runs-on: ubuntu-latest
+    permissions: {}
+    outputs: { list: "${{ steps.t.outputs.list }}" }
+    steps:
+      - id: t
+        env:
+          HAS_STAGE_TOKEN: ${{ secrets.LEGION_DEPLOY_TOKEN_STAGE != '' }}
+          EVENT: ${{ github.event_name }}
+          TARGET: ${{ inputs.target }}
+        run: |
+          if [ "$EVENT" = "workflow_dispatch" ]; then echo "list=[\"$TARGET\"]" >> "$GITHUB_OUTPUT"
+          elif [ "$HAS_STAGE_TOKEN" != "true" ]; then echo 'list=["prod"]' >> "$GITHUB_OUTPUT"
+          else echo 'list=["prod","staging"]' >> "$GITHUB_OUTPUT"; fi
+
+  deploy:
+    needs: [verify, targets]
+    runs-on: ubuntu-latest
+    permissions: { contents: read, packages: write }
+    strategy:
+      fail-fast: false # a staging failure never blocks or undoes the prod deploy
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.list) }}
+    env:
+      TARGET: ${{ matrix.target }}
+      API_URL: ${{ matrix.target == 'staging' && 'https://api.stage.bloxity.io' || 'https://api.bloxity.io' }}
+      LEGION_URL: ${{ matrix.target == 'staging' && 'https://legion.stage.bloxity.io' || 'https://legion.bloxity.io' }}
+      # staging only ever reads the stage token, never the prod one
+      # (secrets[...] picks the secret by NAME, so an empty stage token stays empty instead of
+      # falling through to the prod token the way `cond && a || b` would)
+      DEPLOY_TOKEN: ${{ secrets[matrix.target == 'staging' && 'LEGION_DEPLOY_TOKEN_STAGE' || 'LEGION_DEPLOY_TOKEN'] }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the token, pick channel and image
+        id: cfg
+        run: |
+          if [ -z "$DEPLOY_TOKEN" ]; then
+            if [ "$TARGET" = staging ]; then echo "::error::Secret LEGION_DEPLOY_TOKEN_STAGE is empty (create it on hosting.stage.bloxity.io)."; else echo "::error::Secret LEGION_DEPLOY_TOKEN is empty (create it on hosting.bloxity.io)."; fi
+            exit 1
+          fi
+          channel=dev
+          if [ "$GITHUB_REF_NAME" = main ]; then channel=prod; fi
+          owner="$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          prefix=""
+          if [ "$TARGET" = staging ]; then prefix="stage-"; fi  # a staging build never replaces a prod image
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${owner}/${GAME_ID}-server:${prefix}${channel}-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      # ---- server: build + push the image, then roll it on Legion
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with: { registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}" }
+      - uses: docker/build-push-action@v6
+        with: { context: ., file: ./Dockerfile, push: true, tags: "${{ steps.cfg.outputs.image }}" }
+      - name: Deploy the server
+        env:
+          CHANNEL: ${{ steps.cfg.outputs.channel }}
+          IMAGE: ${{ steps.cfg.outputs.image }}
+        run: |
+          body="$(jq -n --arg channel "$CHANNEL" --arg image "$IMAGE" --arg version "$GITHUB_SHA" --argjson roomSize "$ROOM_SIZE" \
+            '{channel: $channel, image: $image, version: $version, roomSize: $roomSize}')"
+          echo "POST ${LEGION_URL}/v1/apps/${GAME_ID}/deploy  $body"
+          # tolerate a secret pasted with a trailing newline / spaces or a leading "Bearer "
+          token="$(printf '%s' "$DEPLOY_TOKEN" | tr -d '[:space:]')"; token="${token#Bearer}"
+          echo "::add-mask::$token"
+          code="$(curl -sS -o resp.json -w '%{http_code}' -X POST "${LEGION_URL}/v1/apps/${GAME_ID}/deploy" \
+            -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' -d "$body")"
+          cat resp.json; echo
+          if [ "$code" = 401 ] || [ "$code" = 403 ]; then
+            echo "::error::Legion refused the deploy token ($code) for game '${GAME_ID}' on ${LEGION_URL}. Check: the game '${GAME_ID}' exists on $( [ "$TARGET" = staging ] && echo hosting.stage.bloxity.io || echo hosting.bloxity.io ) under the account that owns the token; the secret holds THAT game's deploy token (eye icon on My Games), from the same platform; nothing else was pasted with it."
+            exit 1
+          fi
+          [ "${code:0:1}" = 2 ] || { echo "::error::deploy failed with HTTP $code"; exit 1; }
+
+      # ---- frontend: upload the zip built once in "verify"
+      - uses: actions/download-artifact@v4
+        with: { name: frontend }
+      - name: Upload the frontend
+        env:
+          CHANNEL: ${{ steps.cfg.outputs.channel }}
+        run: |
+          unzip -Z1 frontend.zip | grep -qx 'index.html'
+          token="$(printf '%s' "$DEPLOY_TOKEN" | tr -d '[:space:]')"; token="${token#Bearer}"
+          echo "::add-mask::$token"
+          curl -sS --fail-with-body -X POST \
+            "${API_URL}/v1/hosting/games/${GAME_ID}/frontend?channel=${CHANNEL}&version=${GITHUB_SHA}" \
+            -H "Authorization: Bearer ${token}" -H "Content-Type: application/zip" --data-binary @frontend.zip
+          echo

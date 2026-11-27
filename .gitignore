@@ -1,0 +1,6 @@
+node_modules/
+client/dist/
+server/data/
+frontend.zip
+.env
+.claude/settings.local.json

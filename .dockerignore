@@ -1,0 +1,15 @@
+# Build context = repo root. The Dockerfile only needs:
+#   package.json, package-lock.json, shared/, server/ (minus server/data)
+node_modules
+client
+assets
+tools
+server/data
+frontend.zip
+.git
+.github
+.claude
+.env*
+*.log
+*.md
+*.png
