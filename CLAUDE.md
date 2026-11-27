@@ -31,7 +31,11 @@ Debug handle (local env only): `window.__game`. When the preview pane is hidden,
 - Room `vball`, game id `volley-spike`, 6 per room (`MAX_PLAYERS`; sent as `roomSize` by deploy.yml, never seatCap). Port 2567.
 - **Ball = closed-form flights** (`shared/ball.js`): the server sends `{p, v, a, t0, t1, land}` once per touch; every
   client evaluates it against the shared clock (`Net.serverTime`). No per-frame ball traffic, no jitter. A flight always
-  lands exactly on `land`, inside an alive opponent's slab (`Match.launch`).
+  lands exactly on `land`, inside an alive opponent's slab (`Match.launch`). The serve toss is a FOLLOW flight
+  (`traj.follow` = tosser id): x/z are relative to the tosser, so the ball stays above them while they move.
+- Hitting is forgiving: big reach (`BALL.reach` etc.), a 0.6 s client swing buffer AND a server swing buffer
+  (`BALL.swingBuffer`: an early click keeps retrying). Long rallies speed up after 10 touches and aim for the far
+  corner after 20 (sudden death) so every match ends.
 - **Touches are server-validated** (`Match.tryHit`): the client sends its swing time; the server searches the last
   `BALL.hitGrace` s of the flight against the player's reported body for reach / height. Ground = bump, airborne =
   spike, diving = save; height decides Perfect / Too low. Aim = camera yaw -> the alive opponent slab most in front.
@@ -44,7 +48,7 @@ Debug handle (local env only): `window.__game`. When the preview pane is hidden,
   LEFT, the clay practice court (`prac`) to the RIGHT. The yellow Practice pad on the lobby's right edge teleports you
   onto it. Practice: ALL humans share slab 0, the other three slabs always hold CPUs; nobody is eliminated.
 - Courts: `main`, `prac` and `tut` (one per learner, far east; scripted toss -> jump -> spike -> bump -> dive ->
-  ability -> a 4-player game the learner cannot lose). One `Match` class runs all three.
+  ability -> a 1v1 game against the coach the learner cannot lose). One `Match` class runs all three.
 - Match flow (`room.js` step): intermission + Solo/Duos vote while >= 1 eligible human (tutorial done, not AFK), then
   humans + CPUs (`BOT_FILL`) on slabs; random round modifier; bounty on the human with the best win streak.
   Eliminated players are back in the lobby after 1.7 s and can spectate (arrows / Q).

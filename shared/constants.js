@@ -44,7 +44,8 @@ export const BALL = {
   perfectLow: 0.9, // sweet spot (height above the feet)
   perfectHigh: 3.0,
   tooLow: 0.1, // contact below this is "Too low" (a weak pop-up)
-  hitGrace: 0.4, // server accepts a touch the client saw up to this long ago
+  hitGrace: 0.4,
+  swingBuffer: 0.6, // a click that is a little early keeps trying on the server this long // server accepts a touch the client saw up to this long ago
   landPad: 0.02,
 };
 

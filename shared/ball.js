@@ -35,4 +35,5 @@ export function apexOf(traj) {
 }
 
 export const round3 = (x) => Math.round(x * 1000) / 1000;
-export const packFlight = (f) => ({ p: f.p.map(round3), v: f.v.map(round3), a: f.a.map(round3), t0: round3(f.t0), t1: round3(f.t1), land: f.land.map(round3) });
+// follow: a player's id; then p / land are RELATIVE to that player's feet in x and z (the serve toss).
+export const packFlight = (f) => ({ p: f.p.map(round3), v: f.v.map(round3), a: f.a.map(round3), t0: round3(f.t0), t1: round3(f.t1), land: f.land.map(round3), follow: f.follow || '' });

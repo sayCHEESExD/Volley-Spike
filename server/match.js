@@ -140,7 +140,7 @@ export class Match {
       bump: ['Bump it back', 'Stand in the shadow and click / tap HIT'],
       dive: ['Dive for it', 'Run towards the shadow and press E / DIVE, then HIT'],
       ability: ['Use your Adrenaline ability', 'Press R / the ability button to hit harder'],
-      fight: ['Defeat all players!', 'Make the ball land on their slabs'],
+      fight: ['Beat the coach!', 'Make the ball land on their slab'],
       done: ["You've learnt everything now!", ''],
     };
     const [text, sub] = TEXT[step];
@@ -169,17 +169,31 @@ export class Match {
   toss(m) {
     const body = m.rec.body;
     const g = BALL.gravity * this.mod.gravity;
-    const p0 = [body.x, body.y + 2.2, body.z];
+    const p0 = [0, body.y + 2.2, 0]; // relative to the tosser: the ball stays above them
     const apex = BALL.tossHeight;
     const vy = Math.sqrt(2 * g * apex);
     const down = p0[1] + apex - BALL.radius;
     const T = vy / g + Math.sqrt((2 * down) / g);
-    const traj = makeFlight(p0, [body.x, BALL.radius, body.z], T, [0, -g, 0], this.now);
+    const traj = makeFlight(p0, [0, BALL.radius, 0], T, [0, -g, 0], this.now);
+    traj.follow = m.sid;
     this.ball = { ...this.ball, state: 'fly', holder: '', traj, lastHitter: m.sid, kind: 'toss', tossBy: m.sid, flightId: this.ball.flightId + 1 };
     m.lastHit = this.now;
     this.pushBall();
     if (this.tut && this.tut.step === 'toss') this.tutStep('jump');
     if (m.brain) { m.brain.flight = -1; m.brain.spikeAt = this.now + T * 0.42; }
+  }
+
+  // Where the ball is at time t (a followed flight is offset by its player's feet).
+  ballPos(t, out = { x: 0, y: 0, z: 0 }) {
+    const tr = this.ball.traj;
+    ballAt(tr, t, out);
+    if (tr.follow) { const f = this.members.get(tr.follow); if (f) { out.x += f.rec.body.x; out.z += f.rec.body.z; } }
+    return out;
+  }
+  landPoint() {
+    const tr = this.ball.traj, [x, y, z] = tr.land;
+    if (tr.follow) { const f = this.members.get(tr.follow); if (f) return [x + f.rec.body.x, y, z + f.rec.body.z]; }
+    return [x, y, z];
   }
 
   // ------------------------------------------------------------------ touching the ball
@@ -204,7 +218,7 @@ export class Match {
     for (let i = 0; i <= 6; i++) {
       const t = tc + ((this.now - tc) * i) / 6;
       if (t > b.traj.t1) break;
-      ballAt(b.traj, t, _b);
+      this.ballPos(t, _b);
       const dy = _b.y - body.y;
       const hd = Math.hypot(_b.x - body.x, _b.z - body.z);
       const low = diving ? -0.2 : BALL.reachLow;
@@ -214,7 +228,12 @@ export class Match {
         if (!best || score < best.score) best = { score, dy, hd };
       }
     }
-    if (!best) return { ok: false, why: 'miss' };
+    if (!best) {
+      // too early (or lag): keep the swing alive on the server and retry every tick
+      if (!d.retry) { m.swing = { until: this.now + BALL.swingBuffer, d: { yaw: d.yaw, dive: d.dive, retry: true } }; return { ok: false, why: 'buffered' }; }
+      return { ok: false, why: 'miss' };
+    }
+    m.swing = null;
     // quality
     let kind = air && best.dy > 1.0 ? 'spike' : diving ? 'save' : 'bump';
     let perfect = false, weak = false;
@@ -229,7 +248,7 @@ export class Match {
   // Send the ball from where it is now to a slab chosen by the hitter's aim.
   launch(m, yaw, kind, perfect, weak) {
     const b = this.ball;
-    const p0 = ballAt(b.traj, this.now, { x: 0, y: 0, z: 0 });
+    const p0 = this.ballPos(this.now);
     p0.y = Math.max(p0.y, BALL.radius + 0.25);
     const body = m.rec.body;
     // candidate slabs: alive opponents (never your own or your teammate's)
@@ -254,10 +273,11 @@ export class Match {
     const hw = c.w / 2 - 1.2, hd = c.d / 2 - 1.2;
     let lx, lz;
     const tb = target.rec.body;
-    if ((perfect || kind === 'spike') && !weak) {
+    const sudden = this.rally > 20; // sudden death: long rallies aim away from the receiver
+    if (((perfect || kind === 'spike') && !weak) || sudden) {
       const ux = c.x - tb.x, uz = c.z - tb.z, ul = Math.hypot(ux, uz);
       const sx = ul > 0.5 ? ux / ul : rnd(-1, 1), sz = ul > 0.5 ? uz / ul : rnd(-1, 1);
-      const far = perfect ? 0.5 : 0.3;
+      const far = sudden ? 0.9 : perfect ? 0.5 : 0.3;
       lx = c.x + sx * hw * far + rnd(-0.25, 0.25) * hw;
       lz = c.z + sz * hd * far + rnd(-0.25, 0.25) * hd;
     } else {
@@ -277,7 +297,7 @@ export class Match {
     if (kind === 'save') T *= 1.1;
     T *= this.mod.speed;
     // long rallies speed up (3% per touch after the 10th, down to 45%) so every match ends
-    if (this.rally > 10) { T *= Math.max(0.45, 1 - 0.03 * (this.rally - 10)); if (this.rally === 11) this.send('mstatus', { text: this.statusText, sub: 'The ball is speeding up!' }); }
+    if (this.rally > 10) { T *= Math.max(0.3, 1 - 0.035 * (this.rally - 10)); if (this.rally === 11) this.send('mstatus', { text: this.statusText, sub: 'The ball is speeding up!' }); }
     // ability effects (each "next hit" ability is spent here)
     let g = BALL.gravity * this.mod.gravity;
     const a = [0, -g, 0];
@@ -311,23 +331,24 @@ export class Match {
   tutAfter(step) { this.tut.next = step; }
 
   // The last lesson: a real 4-player game against gentle CPUs. The learner cannot lose it.
+  // The last lesson: a real game against the coach alone (no extra CPUs). The learner cannot lose it.
   startTutorialFight() {
     const me = this.members.get(this.owner);
     const coach = [...this.members.values()].find((m) => m.rec.isBot);
-    const recs = [me.rec, coach.rec, this.room.makeBot('tutorial', 0.5), this.room.makeBot('tutorial', 0.45)];
+    const recs = [me.rec, coach.rec];
     this.members.clear();
-    this.cells = formation(4, this.cx, this.cz).map((c) => ({ ...c, sid: '', dead: false }));
-    recs.forEach((rec, i) => { const m = this.addMember(rec, i, i); if (m.brain) m.brain.skill = i === 1 ? 0.55 : m.brain.skill; this.placeOnCell(m); });
+    this.cells = formation(2, this.cx, this.cz).map((c) => ({ ...c, sid: '', dead: false }));
+    recs.forEach((rec, i) => { const m = this.addMember(rec, i, i); if (m.brain) m.brain.skill = 0.5; this.placeOnCell(m); });
     this.ball = { ...this.ball, state: 'none', holder: '', traj: null };
     this.send('msetup', this.setupMsg());
     this.tutStep('fight');
-    this.serveFrom(this.owner, 1.5);
+    this.serveFrom(this.owner, 1.2);
   }
 
   // ------------------------------------------------------------------ landing
   land() {
     const b = this.ball;
-    const [lx, , lz] = b.traj.land;
+    const [lx, , lz] = this.landPoint();
     const ci = this.cellAt(lx, lz);
     b.state = 'none';
     const owner = ci >= 0 ? this.cells[ci].sid : '';
@@ -463,6 +484,12 @@ export class Match {
     if (this.phase === 'end' && now >= this.phaseEnd) this.room.onMatchOver(this);
     // tutorial pacing
     if (this.tut) this.tutTick();
+    // buffered swings: retry until the ball is in reach or the window closes
+    for (const m of this.members.values()) {
+      if (!m.swing) continue;
+      if (now > m.swing.until || !m.alive) { m.swing = null; if (!m.rec.isBot) m.rec.client.send('hitq', { miss: true }); continue; }
+      if (this.ball.state === 'fly') this.tryHit(m.sid, { ...m.swing.d, t: now });
+    }
     // CPU players
     for (const m of this.members.values()) if (m.brain && m.alive) this.think(m, dt);
   }
@@ -490,7 +517,7 @@ export class Match {
       this.tutStep(n);
     }
     if (t.step === 'ability' && me.rec.abil && me.rec.abil.until > this.now && !t.fightAt) {
-      t.next = null; t.fightAt = this.now + 2.2;
+      t.next = null; t.fightAt = this.now + 1.2;
       this.send('tut', { step: 'nice', text: 'Nice work!', sub: 'Now for a real game...' });
     }
     if (t.fightAt && this.now >= t.fightAt) { t.fightAt = 0; this.startTutorialFight(); }
@@ -505,7 +532,7 @@ export class Match {
     let gx = c.x, gz = c.z, jump = false;
     if (b.state === 'held' && b.holder === m.sid && now >= (br.tossAt || 0)) this.toss(m);
     if (b.state === 'fly') {
-      const [lx, , lz] = b.traj.land;
+      const [lx, , lz] = this.landPoint();
       const mine = pointInCell(c, lx, lz);
       const selfToss = b.kind === 'toss' && b.lastHitter === m.sid;
       if (br.flight !== b.flightId) {
@@ -527,7 +554,7 @@ export class Match {
         gx = lx + (br.will ? br.ex * 0.3 : br.ex + Math.sign(br.ex || 1) * 1.6);
         gz = lz + (br.will ? br.ez * 0.3 : br.ez + Math.sign(br.ez || 1) * 1.6);
         if (selfToss) { gx = body.x; gz = body.z; }
-        ballAt(b.traj, now, _b);
+        this.ballPos(now, _b);
         const left = b.traj.t1 - now;
         const dy = _b.y - body.y, hd = Math.hypot(_b.x - body.x, _b.z - body.z);
         // jump to spike a high ball now and then
@@ -541,7 +568,7 @@ export class Match {
             const tc = this.cells[tgt.cell];
             const yaw = Math.atan2(tc.x - body.x, tc.z - body.z);
             if (this.kind === 'main' && Math.random() < 0.06) this.room.useAbility(m.rec);
-            const r = this.tryHit(m.sid, { t: now, yaw, air: !body.grounded });
+            const r = this.tryHit(m.sid, { t: now, yaw, air: !body.grounded, retry: true });
             if (r.ok && this.tut && this.tut.wantFar) {
               // the dive drill: send it to the far corner of the learner's slab
               const t = this.ball.traj;

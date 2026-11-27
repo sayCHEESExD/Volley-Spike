@@ -423,9 +423,19 @@ export class Game {
     this.swing = { until: this.time + 0.6, court: mc.c }; // an early click waits for the ball
   }
 
+  // a followed flight (the serve toss) rides above its player: offset by their feet
+  ballNow(traj, t, out) {
+    ballAt(traj, t, out);
+    if (traj.follow) {
+      const p = traj.follow === this.net.id ? this.me : this.players.get(traj.follow);
+      if (p) { out.x += p.x; out.z += p.z; }
+    }
+    return out;
+  }
+
   reachable(traj, t) {
     const b = this.me;
-    ballAt(traj, t, _b);
+    this.ballNow(traj, t, _b);
     if (t > traj.t1) return false;
     const dy = _b.y - b.y, hd = Math.hypot(_b.x - b.x, _b.z - b.z);
     const magnet = this.abil.id === 'magnet' && this.abil.until > this.serverNow() ? 1.7 : 1;
@@ -548,7 +558,7 @@ export class Game {
         const h = this.players.get(bm.holder);
         if (h) { _b.x = h.x + Math.sin(h.yaw) * 0.35; _b.y = h.y + 2.35 + Math.sin(this.time * 4) * 0.06; _b.z = h.z + Math.cos(h.yaw) * 0.35; show = true; }
       } else if (bm && bm.state === 'fly' && bm.traj) {
-        ballAt(bm.traj, now, _b); show = true; flying = true;
+        this.ballNow(bm.traj, now, _b); show = true; flying = true;
       }
       c.ball.place(_b, show, flying, camPos);
       c.view.showMarker(flying && bm.kind !== 'toss' ? bm.traj.land : null);
